@@ -65,7 +65,11 @@ plutil -replace WorkingDirectory  -string "$REPO_DIR"                 "$PLIST_DE
 plutil -replace StandardOutPath   -string "$LOG_DIR/launchd.out.log"  "$PLIST_DEST"
 plutil -replace StandardErrorPath -string "$LOG_DIR/launchd.err.log"  "$PLIST_DEST"
 
-PA_JSON=$("$PYTHON" -c 'import json, sys; print(json.dumps([sys.argv[1], sys.argv[2], "--sqlite-file", sys.argv[3]]))' \
+# The argv list here is what the agent actually runs with; it must match the
+# template's ProgramArguments (which plutil overwrites). --modifier-taps is
+# included so the background agent also counts bare modifier presses; it only
+# adds aggregate counts, keeping the same counts-only privacy posture.
+PA_JSON=$("$PYTHON" -c 'import json, sys; print(json.dumps([sys.argv[1], sys.argv[2], "--sqlite-file", sys.argv[3], "--modifier-taps"]))' \
   "$PYTHON" "$REPO_DIR/key_logger.py" "$DB")
 plutil -replace ProgramArguments -json "$PA_JSON" "$PLIST_DEST"
 

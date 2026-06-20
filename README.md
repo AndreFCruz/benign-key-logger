@@ -61,6 +61,8 @@ By default the plaintext file log prepends a UTC ISO timestamp to each entry. If
 
 By default left and right modifiers are still remapped together in the log (`<shift_l>` and `<shift_r>` both become `<shift>`, and similarly for Control, Alt, and Command). If you want to preserve those distinctions, use `--modifier-sides`.
 
+By default a modifier key is only logged as part of a combo (`<cmd> + c`); pressing and releasing a modifier on its own records nothing, and `Shift` is folded into the character it produces (`Shift+a` → `A`). If you also want to count *bare* modifier taps — a `Shift`, `Command`, `Control`, or `Option` pressed and released without any other key — use `--modifier-taps`. A bare tap is detected on key release (when a held modifier comes up having never contributed to a logged keystroke) and counted under its own name, e.g. `<cmd>`. These bare taps are deliberately kept out of the bigram/trigram chain, so enabling the flag adds the standalone counts without disturbing your existing typed-character adjacency stats. (The opt-in `--full-events` table already recorded every individual modifier up/down; `--modifier-taps` is what surfaces bare presses in the default `key_counts` view.)
+
 Among other options, two applications I use to look at and query the SQLite data file are
 - [SQLiteStudio](https://sqlitestudio.pl/)
 - [DB Browser for SQLite](https://sqlitebrowser.org/)
@@ -98,6 +100,7 @@ Some common examples:
 - Old behavior, exact rows only with no count tables: `python3 key_logger.py --no-counts --raw-events`
 - Physical key logging instead of resulting characters: `python3 key_logger.py --physical-keys`
 - Preserve left/right modifier distinctions: `python3 key_logger.py --modifier-sides`
+- Also count bare modifier taps (a lone Shift/Cmd/Ctrl/Option press): `python3 key_logger.py --modifier-taps`
 - Inspect the logger's internal behavior without echoing captured keys: `python3 key_logger.py --debug`
 - SQLite plus plaintext log file: `python3 key_logger.py --file`
 - Plaintext file with timestamps: `python3 key_logger.py --file`
@@ -169,6 +172,7 @@ If you want a quick trust checklist before running it, here are the main things 
 - Debug output is opt-in: `--debug` enables internal state logging but does not imply key echo.
 - Physical key logging is opt-in: `--physical-keys` switches from logging the resulting character to logging the physical key plus modifiers.
 - Left/right modifier distinction is opt-in: `--modifier-sides` keeps modifier sides separate instead of remapping them together.
+- Bare modifier counting is opt-in: `--modifier-taps` additionally counts standalone Shift/Command/Control/Option presses; off by default, and it only adds aggregate counts (no exact sequence) the same way the rest of the default sink does.
 - Stdout echo is off by default: keystrokes are only printed to the terminal if you pass `--stdout`.
 - SQLite is on by default: the database is used unless you disable it with `--no-sqlite` (the master switch for all database sinks).
 - Aggregate counts are the default sink: keystrokes are stored as per-bucket counts, not exact sequences, so passwords can't be read back out. Disable with `--no-counts`.

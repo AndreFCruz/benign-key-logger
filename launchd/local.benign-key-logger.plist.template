@@ -30,6 +30,7 @@
     <string>__SCRIPT__</string>
     <string>--sqlite-file</string>
     <string>__DB__</string>
+    <string>--modifier-taps</string>
   </array>
 
   <key>WorkingDirectory</key>

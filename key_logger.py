@@ -45,6 +45,7 @@ DEFAULT_DEBUG = False
 DEFAULT_LOG_PHYSICAL_KEYS = False
 DEFAULT_TIMESTAMP_FILE_LOGS = True
 DEFAULT_DISTINGUISH_MODIFIER_SIDES = False
+DEFAULT_COUNT_MODIFIER_TAPS = False
 
 # Keystrokes are aggregated into counts grouped by this many minutes, so the
 # exact typed sequence (passwords included) is never stored, only per-bucket
@@ -269,6 +270,7 @@ class Config:
   debug: bool = DEFAULT_DEBUG
   log_physical_keys: bool = DEFAULT_LOG_PHYSICAL_KEYS
   distinguish_modifier_sides: bool = DEFAULT_DISTINGUISH_MODIFIER_SIDES
+  count_modifier_taps: bool = DEFAULT_COUNT_MODIFIER_TAPS
   log_file_name: str = DEFAULT_LOG_FILE_NAME
   sqlite_file_name: str = DEFAULT_SQLITE_FILE_NAME
   enable_sqlite_wal: bool = DEFAULT_ENABLE_SQLITE_WAL
@@ -396,6 +398,18 @@ def build_parser():
       help='keep left/right modifier keys distinct instead of remapping them'
   )
   parser.add_argument(
+      '--modifier-taps',
+      dest='count_modifier_taps',
+      action='store_true',
+      help='also count standalone modifier presses (a bare Shift/Cmd/Ctrl/Option tap)'
+  )
+  parser.add_argument(
+      '--no-modifier-taps',
+      dest='count_modifier_taps',
+      action='store_false',
+      help='do not count standalone modifier presses (the default)'
+  )
+  parser.add_argument(
       '--debug',
       action='store_true',
       help='show internal debug logging without implying key echo'
@@ -437,6 +451,7 @@ def build_parser():
       send_all_events_to_sqlite=DEFAULT_SEND_ALL_EVENTS_TO_SQLITE,
       file_timestamps=DEFAULT_TIMESTAMP_FILE_LOGS,
       enable_sqlite_wal=DEFAULT_ENABLE_SQLITE_WAL,
+      count_modifier_taps=DEFAULT_COUNT_MODIFIER_TAPS,
   )
   return parser
 
@@ -484,6 +499,7 @@ def parse_args(argv=None):
       debug=args.debug,
       log_physical_keys=args.physical_keys,
       distinguish_modifier_sides=args.modifier_sides,
+      count_modifier_taps=args.count_modifier_taps,
       log_file_name=args.log_file,
       sqlite_file_name=args.sqlite_file,
       enable_sqlite_wal=args.enable_sqlite_wal,
@@ -628,6 +644,10 @@ class KeyLoggerApp:
   def __init__(self, config):
     self.config = config
     self.keys_currently_down = []
+    # The held modifier keys that have already been folded into a logged
+    # keystroke (so they should NOT later count as a bare tap on release).
+    # Tracked per physical key; only meaningful when count_modifier_taps is on.
+    self.consumed_modifiers = set()
     self.pending_sqlite_writes = 0
     self.last_sqlite_commit_time = None
     self.db_connection = None
@@ -916,6 +936,15 @@ class KeyLoggerApp:
     and <ctrl> + <shift> + a (and logging <ctrl> + A seems,
     conceptually, to miss the mark on logging combos).
     """
+    # A real keystroke is firing, so every modifier currently held has now
+    # contributed to a logged entry (including <shift> when it's absorbed into
+    # a capitalized character). Mark them consumed so key_up() doesn't also
+    # count them as bare taps. No-op unless --modifier-taps is on.
+    if self.config.count_modifier_taps:
+      for held_key in self.keys_currently_down:
+        if held_key in MODIFIER_KEYS:
+          self.consumed_modifiers.add(held_key)
+
     modifiers_down = [
         canonicalize_key(k, self.config.distinguish_modifier_sides)
         for k in self.keys_currently_down
@@ -940,6 +969,19 @@ class KeyLoggerApp:
             self.config.distinguish_modifier_sides
         )]
     )
+    self.record_log_entry(log_entry)
+
+  def record_log_entry(self, log_entry, include_in_ngrams=True):
+    """
+    Fan a finished log entry out to every enabled sink: the stdout echo, the
+    aggregate counts, the exact-row `key_log` table, and the plaintext file.
+
+    Factored out of log() so bare modifier taps (see log_bare_modifier) can
+    reuse the exact same sink wiring while opting out of the bigram/trigram
+    chain via include_in_ngrams=False. A lone modifier press isn't an
+    adjacency-relevant keystroke, and skipping the chain means enabling
+    --modifier-taps leaves the existing typed-character n-gram stats untouched.
+    """
     if self.config.echo_keys_to_stdout:
       logging.info(f'key: {log_entry}')
 
@@ -949,7 +991,8 @@ class KeyLoggerApp:
     if self.config.send_counts_to_sqlite:
       bucket = bucket_label(now_dt, self.config.bucket_interval_seconds)
       self.record_unigram_count(bucket, log_entry)
-      self.update_ngram_chain(bucket, log_entry, time.monotonic())
+      if include_in_ngrams:
+        self.update_ngram_chain(bucket, log_entry, time.monotonic())
 
     if self.config.send_raw_events_to_sqlite:
       row_values = (timestamp_utc, log_entry)
@@ -967,6 +1010,19 @@ class KeyLoggerApp:
           file_entry = f'{timestamp_utc},{log_entry}'
         log_file.write(f'{file_entry}\n')
         logging.debug(f'logged to file: {log_entry}')
+
+  def log_bare_modifier(self, key):
+    """
+    Record a standalone modifier press — a Shift, Command, Control, or Option
+    tapped and released without any other key. Detected in key_up() when a held
+    modifier comes up having never been folded into a logged keystroke. It's
+    counted under its canonical name (e.g. '<cmd>') and, unlike a normal
+    keystroke, is kept out of the bigram/trigram chain.
+    """
+    log_entry = key_to_str(
+        canonicalize_key(key, self.config.distinguish_modifier_sides)
+    )
+    self.record_log_entry(log_entry, include_in_ngrams=False)
 
   def record_unigram_count(self, bucket, key_str):
     self.db_cursor.execute(INSERT_KEY_COUNT_SQL, (bucket, key_str))
@@ -1145,6 +1201,19 @@ class KeyLoggerApp:
               f'{[key_to_str(k) for k in self.keys_currently_down]}'
           )
           self.keys_currently_down = []
+          self.consumed_modifiers = set()
+    else:
+      # The key was genuinely held (its down was paired). If it's a modifier
+      # that never got folded into a logged keystroke while down, it was a
+      # bare tap, so count it on its own. See log_bare_modifier().
+      if (self.config.count_modifier_taps
+          and key in MODIFIER_KEYS
+          and key not in self.consumed_modifiers):
+        self.log_bare_modifier(key)
+    finally:
+      # Whether the key was a real release, a bare tap, or an orphan up, its
+      # consumed-state is now stale; drop it so the next press starts clean.
+      self.consumed_modifiers.discard(key)
 
     logging.debug(
         f'key up  : {key_to_str(key)} : '
@@ -1197,6 +1266,7 @@ class KeyLoggerApp:
         f'debug={"on" if self.config.debug else "off"}, '
         f'physical_keys={"on" if self.config.log_physical_keys else "off"}, '
         f'modifier_sides={"on" if self.config.distinguish_modifier_sides else "off"}, '
+        f'modifier_taps={"on" if self.config.count_modifier_taps else "off"}, '
         f'stdout={"on" if self.config.echo_keys_to_stdout else "off"}, '
         f'wal={"on" if self.config.enable_sqlite_wal else "off"}'
     )
